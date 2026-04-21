@@ -62,7 +62,6 @@ public struct Operand : IEquatable<Operand>
                     break;
                 }
 
-
                 case OperandKind.InlineSwitch:
                 {
                     var count = (Value is ImmutableArray<Instruction> immutableTargets) ? immutableTargets.Length : ((int[])Value!).Length;

@@ -6,7 +6,7 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace TerraFX.Optimization.Utilities;
 
-internal static unsafe partial class ExceptionUtilities
+internal static partial class ExceptionUtilities
 {
     [DoesNotReturn]
     public static void ThrowArgumentOutOfRangeException<T>(string paramName, T actualValue, string message)

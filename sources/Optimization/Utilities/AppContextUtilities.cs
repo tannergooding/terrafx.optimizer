@@ -4,7 +4,7 @@ using System;
 
 namespace TerraFX.Optimization.Utilities;
 
-internal static unsafe class AppContextUtilities
+internal static class AppContextUtilities
 {
     public static bool GetAppContextData(string name, bool defaultValue)
     {

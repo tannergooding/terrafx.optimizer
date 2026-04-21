@@ -8,7 +8,7 @@ using TerraFX.Optimization.Runtime;
 
 namespace TerraFX.Optimization.Utilities;
 
-internal static unsafe partial class ExceptionUtilities
+internal static partial class ExceptionUtilities
 {
     [DoesNotReturn]
     public static void ThrowForInvalidKind<TEnum>(TEnum value, [CallerArgumentExpression(nameof(value))] string valueExpression = "")

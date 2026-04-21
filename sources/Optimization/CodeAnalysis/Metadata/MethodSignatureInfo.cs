@@ -34,7 +34,6 @@ public sealed class MethodSignatureInfo : StandaloneSignatureInfo
         }
     }
 
-
     protected override string ResolveDisplayString()
     {
         var builder = new StringBuilder();
