@@ -1,306 +1,305 @@
 // Copyright © Tanner Gooding and Contributors. Licensed under the MIT License (MIT). See License.md in the repository root for more information.
 
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection.Metadata;
 using static TerraFX.Optimization.Utilities.ExceptionUtilities;
 
 namespace TerraFX.Optimization.CodeAnalysis;
 
-/// <summary>Defines a flowgraph where each node defines a basic block of instructions.</summary>
-public sealed class Flowgraph
+/// <summary>Defines methods for working with <see cref="Flowgraph{T}"/> instances.</summary>
+public static class Flowgraph
 {
-    private readonly SortedSet<BasicBlock> _blocks;
-    private bool _isReadOnly;
-
-    public Flowgraph()
+    /// <summary>Creates a new <see cref="Flowgraph{T}"/> instance.</summary>
+    /// <typeparam name="T">The type of the basic blocks in the flowgraph.</typeparam>
+    /// <param name="firstBlock">The first block in the flowgraph.</param>
+    /// <returns>A new <see cref="Flowgraph{T}"/> instance.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="firstBlock"/> is <c>null</c>.</exception>
+    public static Flowgraph<T> Create<T>(BasicBlock<T> firstBlock)
     {
-        _blocks = [];
+        ArgumentNullException.ThrowIfNull(firstBlock);
+        return new Flowgraph<T>(firstBlock);
     }
 
-    public IReadOnlySet<BasicBlock> Blocks => _blocks;
+    /// <summary>Creates a new <see cref="Flowgraph{T}"/> instance with <see cref="Flowgraph{T}.FirstBlock" /> set to <c>null</c>.</summary>
+    /// <typeparam name="T">The type of the basic blocks in the flowgraph.</typeparam>
+    /// <returns>A new <see cref="Flowgraph{T}"/> instance.</returns>
+    /// <remarks>This method is unsafe because it creates an invalid flowgraph which may cause undefined behavior if used prior to proper initialization.</remarks>
+    public static Flowgraph<T> CreateUnsafe<T>()
+    {
+        return new Flowgraph<T>(
+            firstBlock: null!
+        );
+    }
 
-    public BasicBlock FirstBlock => Blocks.First();
-
-    public bool IsReadOnly => _isReadOnly;
-
-    public static Flowgraph Decode(MetadataReader metadataReader, MethodBodyBlock methodBody)
+    /// <summary>Decodes a method body into a flowgraph.</summary>
+    /// <typeparam name="T">The type of the values in the statements for the flowgraph.</typeparam>
+    /// <param name="metadataReader">The metadata reader.</param>
+    /// <param name="methodBody">The method body block.</param>
+    /// <param name="valueFactory">A factory function to create values for the statements.</param>
+    /// <returns>A flowgraph representing the method body.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="metadataReader"/> is <c>null</c>.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="methodBody"/> is <c>null</c>.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="valueFactory"/> is <c>null</c>.</exception>
+    public static Flowgraph<T> Decode<T>(MetadataReader metadataReader, MethodBodyBlock methodBody, Func<Instruction, T> valueFactory)
     {
         ArgumentNullException.ThrowIfNull(metadataReader);
         ArgumentNullException.ThrowIfNull(methodBody);
+        ArgumentNullException.ThrowIfNull(valueFactory);
 
-        // This is essentially a depth-first traversal of the blocks that dynamically
-        // adds the parents, children, and instructions during the traversal. We use
-        // a stack-based algorithm to track pending blocks, rather than using recursion,
-        // so that we can process much more complex methods.
+        // This is a single pass algorithm which decodes the IL instructions and
+        // constructs the flowgraph at the same time. When encountering a forward
+        // branch we pre-emptively create the target block and insert it into the
+        // sequence. This is fine because we will eventually decode the first statement
+        // of that block as part of the linear decoding. However, when encountering a
+        // backward branch we need to search backwards for the appropriate block
+        // containing the target statement and potentially split it into two blocks.
+        //
+        // One of the key invariants of the algorithm is that created blocks and
+        // statements have their Ids set to the IL offset of the instruction they
+        // represent. This allows for us to ensure correct sorting while building the
+        // flowgraph and to then fix up the IDs later to be sequential when we validate
+        // that the flowgraph is well-formed.
 
-        // We have two maps that are used to track the internal state of the graph:
-        //  * instructionMap: Contains a map of every instruction to the block it belongs to
-        //  * firstInstructionMap: Contains a map of the first instruction for each block
+        var ilReader = methodBody.GetILReader();
 
-        // For each non-branching instruction, we just add the next instruction to the block
-        // currently being processed. But only after checking if it is the first instruction
-        // of another block (any other instruction should not have been processed yet). When it
-        // is the first instruction of another block, we add that block as a child of the current
-        // block and move to process the next block in the stack.
+        var firstInstruction = Instruction.Decode(metadataReader, ref ilReader);
+        var firstStatement = Statement.Create(0, valueFactory(firstInstruction));
+        var firstBlock = BasicBlock.Create(0, firstStatement);
 
-        // When we reach a branching instruction we create a new block for each of the target
-        // instruction(s) and push them onto the stack. Like with the non-branching instructions,
-        // we check if it is the first instruction of existing block and similarly add it as a child
-        // of the current block. We then move to process the other target instruction(s) for the
-        // branch before finally moving to process the next block in the stack. Additionally, for
-        // a block that is not already the first instruction of another block, we check if it has
-        // been processed already. If so, we then move that instruction, and any subsequent
-        // instructions from the existing block to a new block and make the new block a child
-        // of the existing block. We finally move all children of the existing block to be children
-        // of the existing block to ensure the directed links remain correct.
+        var previousStatement = firstStatement;
+        var currentBlock = firstBlock;
+        var nextOffset = ilReader.Offset;
 
-        var firstInstruction = Instruction.Decode(metadataReader, methodBody);
-        var firstBlock = new BasicBlock(firstInstruction);
-
-        var pendingBlocks = new Stack<BasicBlock>();
-        pendingBlocks.Push(firstBlock);
-
-        var firstInstructionMap = new SortedDictionary<Instruction, BasicBlock>() {
-            [firstInstruction] = firstBlock,
-        };
-
-        var instructionMap = new SortedDictionary<Instruction, BasicBlock>() {
-            [firstInstruction] = firstBlock,
-        };
-
-        while (pendingBlocks.Count != 0)
+        while (ilReader.RemainingBytes != 0)
         {
-            var currentBlock = pendingBlocks.Pop();
-            var instruction = currentBlock.FirstInstruction;
+            var offset = nextOffset;
 
-            Debug.Assert(instruction is not null, "Expected the first instruction to be not null.");
+            var instruction = Instruction.Decode(metadataReader, ref ilReader);
+            nextOffset = ilReader.Offset;
 
-            while (instruction is not null)
+            var currentStatement = Statement.Create(offset, valueFactory(instruction));
+
+            if (!TryGetNextBlock(offset, currentBlock, out var nextBlock))
             {
-                var nextInstruction = instruction.Next;
-                var opcode = instruction.Opcode;
-                var operandValue = instruction.Operand.Value;
-
-                switch (opcode.ControlFlow)
-                {
-                    case ControlFlowKind.Branch:
-                    {
-                        // Unconditional branches specify the next instruction as their operand and
-                        // will cause an unprocessed instruction to push a new block onto the stack.
-
-                        Debug.Assert(operandValue is Instruction, "Expected an instruction for the branch target.");
-
-                        var targetInstruction = (Instruction)operandValue!;
-                        ProcessFirstInstructionForParent(currentBlock, targetInstruction, instructionMap, firstInstructionMap, pendingBlocks);
-
-                        instruction = null;
-                        break;
-                    }
-
-                    case ControlFlowKind.Break:
-                    case ControlFlowKind.Call:
-                    case ControlFlowKind.Next:
-                    {
-                        // Break, Call, and Next instructions just transfer control to the instruction
-                        // at the next logical offset, they continue processing on the current block.
-
-                        Debug.Assert(nextInstruction is not null, "Expected a next instruction.");
-                        instruction = nextInstruction!;
-
-                        if (firstInstructionMap.TryGetValue(instruction, out var childBlock))
-                        {
-                            // This is already the first instruction of a block, so we just need
-                            // to add the existing block as a child of the current block and return
-                            // false so that we stop processing this sequence.
-
-                            currentBlock.AddChild(childBlock);
-                            childBlock.AddParent(currentBlock);
-
-                            instruction = null;
-                        }
-                        else
-                        {
-                            // This instruction hasn't been processed yet, so we need to process it by
-                            // adding it to the current block and returning true so that we can continue
-                            // processing the current sequence.
-
-                            Debug.Assert(!currentBlock.Contains(instruction), "Expected the basic block to not contain the target instruction.");
-
-                            currentBlock.LastInstruction = instruction;
-                            instructionMap.Add(instruction, currentBlock);
-                        }
-
-                        nextInstruction = null;
-                        break;
-                    }
-
-                    case ControlFlowKind.Cond_branch:
-                    {
-                        if (opcode.Kind == OpcodeKind.Switch)
-                        {
-                            // Switch statements are special in that they can have more than two
-                            // child blocks. We need to process each of the normal blocks plus the
-                            // instruction at the next logical offset.
-
-                            Debug.Assert(operandValue is IReadOnlyList<Instruction>, "Expected an immutable array of instructions for the branch targets.");
-                            var targetInstructions = (IReadOnlyList<Instruction>)operandValue!;
-
-                            foreach (var targetInstruction in targetInstructions)
-                            {
-                                ProcessFirstInstructionForParent(currentBlock, targetInstruction, instructionMap, firstInstructionMap, pendingBlocks);
-                            }
-                        }
-                        else
-                        {
-                            // Conditional branches should always have two children. One child will
-                            // be the target instruction if the branch is taken and the other will
-                            // be the instruction at the next logical offset.
-
-                            Debug.Assert(operandValue is Instruction, "Expected an instruction for the branch target.");
-
-                            var targetInstruction = (Instruction)operandValue!;
-                            ProcessFirstInstructionForParent(currentBlock, targetInstruction, instructionMap, firstInstructionMap, pendingBlocks);
-                        }
-                        instruction = null;
-
-                        // We need to add the next logical instruction as well, for when none of the
-                        // branch conditions are met. However, we want to add this as a child block and
-                        // then do no further processing.
-
-                        Debug.Assert(nextInstruction is not null, "Expected a next instruction.");
-                        ProcessFirstInstructionForParent(currentBlock, nextInstruction!, instructionMap, firstInstructionMap, pendingBlocks);
-
-                        nextInstruction = null;
-                        break;
-                    }
-
-                    case ControlFlowKind.Meta:
-                    {
-                        // Meta blocks generally provide additional information to the instruction at
-                        // the next logical offset. We just want to treat them as `Next` for most cases.
-                        goto case ControlFlowKind.Next;
-                    }
-
-                    case ControlFlowKind.Return:
-                    case ControlFlowKind.Throw:
-                    {
-                        // Return and Throw instructions terminate the sequence for the current block and
-                        // do not cause any new blocks to appear on the stack.
-
-                        instruction = null;
-                        break;
-                    }
-
-                    default:
-                    {
-                        ThrowUnreachableException();
-                        break;
-                    }
-                }
-
-                if (nextInstruction is not null)
-                {
-                    // Ensure the next instruction has already been processed or is part of the pending
-                    // block list so that we can properly track dead/dangling code for later cleanup.
-                    _ = ProcessFirstInstruction(nextInstruction, instructionMap, firstInstructionMap, pendingBlocks);
-                }
-            }
-        }
-
-        var flowgraph = new Flowgraph();
-
-        foreach (var block in firstInstructionMap.Values)
-        {
-            block.Freeze();
-            flowgraph.AddBlock(block);
-        }
-
-        flowgraph.Freeze();
-        return flowgraph;
-
-        static void ProcessFirstInstructionForParent(BasicBlock parentBlock, Instruction firstInstruction, SortedDictionary<Instruction, BasicBlock> instructionMap, SortedDictionary<Instruction, BasicBlock> firstInstructionMap, Stack<BasicBlock> pendingBlocks)
-        {
-            var childBlock = ProcessFirstInstruction(firstInstruction, instructionMap, firstInstructionMap, pendingBlocks);
-
-            parentBlock.AddChild(childBlock);
-            childBlock.AddParent(parentBlock);
-        }
-
-        static BasicBlock ProcessFirstInstruction(Instruction firstInstruction, SortedDictionary<Instruction, BasicBlock> instructionMap, SortedDictionary<Instruction, BasicBlock> firstInstructionMap, Stack<BasicBlock> pendingBlocks)
-        {
-            BasicBlock childBlock;
-
-            if (firstInstructionMap.TryGetValue(firstInstruction, out childBlock!))
-            {
-                // This is already the first instruction of a block, so we don't need
-                // to do anything and can just return.
-
-                Debug.Assert(instructionMap.ContainsKey(firstInstruction), "Expected instruction to have been processed already.");
-            }
-            else if (instructionMap.TryGetValue(firstInstruction, out childBlock!))
-            {
-                // This instruction has already been processed, but it is not the first
-                // instruction of the block it belongs to. We need to create a new block
-                // where it is the first instruction and insert it as a child of the
-                // existing block.
-
-                var targetBlock = new BasicBlock(firstInstruction) {
-                    LastInstruction = childBlock.LastInstruction
-                };
-
-                Debug.Assert(firstInstruction.Previous is not null, "");
-                childBlock.LastInstruction = firstInstruction.Previous!;
-
-                firstInstructionMap.Add(firstInstruction, targetBlock);
-
-                targetBlock.AddChildren(childBlock.Children);
-                childBlock.ClearChildren();
-
-                childBlock.AddChild(targetBlock);
-                targetBlock.AddParent(childBlock);
+                // We are continuing in the same block, so continue the current
+                // sequence by inserting ourselves after the previosu statement.
+                currentStatement.InsertAfter(previousStatement);
             }
             else
             {
-                // This instruction hasn't been processed yet, so we need to process it by
-                // creating a new block and adding it as the first instruction and then
-                // pushing it into the list of pending blocks.
+                // We are the first statement of a new block, so we should have
+                // terminated the last sequence and need to start a new one.
 
-                childBlock = new BasicBlock(firstInstruction);
+                Debug.Assert(nextBlock.FirstStatement is null);
+                Debug.Assert(previousStatement.NextStatement is null);
 
-                instructionMap.Add(firstInstruction, childBlock);
-                firstInstructionMap.Add(firstInstruction, childBlock);
-
-                pendingBlocks.Push(childBlock);
+                currentBlock = nextBlock;
+                currentBlock.FirstStatement = currentStatement;
             }
 
-            return childBlock;
-        }
-    }
+            var operand = instruction.Operand;
 
-    public void AddBlock(BasicBlock block)
-    {
-        if (IsReadOnly)
+            switch (operand.Kind)
+            {
+                case OperandKind.InlineBrTarget:
+                {
+                    Debug.Assert(operand.Value is int, "Expected a 4-byte signed branch target.");
+                    var targetOffset = nextOffset + (int)operand.Value;
+                    ProcessBranchTarget(targetOffset, currentBlock);
+                    EnsureNextBlockExistsForBranch(nextOffset, currentBlock, ilReader.RemainingBytes, instruction.Opcode.ControlFlow);
+                    break;
+                }
+
+                case OperandKind.InlineSwitch:
+                {
+                    Debug.Assert(operand.Value is int[], "Expected an array of 4-byte signed branch targets.");
+                    var targets = (int[])operand.Value;
+
+                    for (var i = 0; i < targets.Length; i++)
+                    {
+                        var targetOffset = nextOffset + targets[i];
+                        ProcessBranchTarget(targetOffset, currentBlock);
+                    }
+                    EnsureNextBlockExistsForBranch(nextOffset, currentBlock, ilReader.RemainingBytes, instruction.Opcode.ControlFlow);
+                    break;
+                }
+
+                case OperandKind.ShortInlineBrTarget:
+                {
+                    Debug.Assert(operand.Value is sbyte, "Expected a 1-byte signed branch target.");
+                    var targetOffset = nextOffset + (sbyte)operand.Value;
+                    ProcessBranchTarget(targetOffset, currentBlock);
+                    EnsureNextBlockExistsForBranch(nextOffset, currentBlock, ilReader.RemainingBytes, instruction.Opcode.ControlFlow);
+                    break;
+                }
+
+                case OperandKind.InlineNone:
+                case OperandKind.InlineField:
+                case OperandKind.InlineI:
+                case OperandKind.InlineI8:
+                case OperandKind.InlineMethod:
+                case OperandKind.InlineR:
+                case OperandKind.InlineSig:
+                case OperandKind.InlineString:
+                case OperandKind.InlineTok:
+                case OperandKind.InlineType:
+                case OperandKind.InlineVar:
+                case OperandKind.ShortInlineI:
+                case OperandKind.ShortInlineR:
+                case OperandKind.ShortInlineVar:
+                {
+                    // Nothing to handle
+                    break;
+                }
+
+                default:
+                {
+                    ThrowUnreachableException();
+                    break;
+                }
+            }
+
+            previousStatement = currentStatement;
+        }
+
+        var flowgraph = Create(firstBlock);
         {
-            ThrowForReadOnly(nameof(Flowgraph));
+            var blockId = 0;
+
+            for (var block = firstBlock; block is not null; block = block.NextBlock)
+            {
+                block.Id = blockId++;
+            }
+
+            var statementId = 0;
+
+            for (var statement = firstStatement; statement is not null; statement = statement.NextStatement)
+            {
+                statement.Id = statementId++;
+            }
         }
-        _ = _blocks.Add(block);
+        return flowgraph;
+
+        static void EnsureNextBlockExistsForBranch(int targetOffset, BasicBlock<T> currentBlock, int remainingBytes, ControlFlowKind controlFlow)
+        {
+            if (remainingBytes != 0)
+            {
+                var nextBlock = currentBlock.NextBlock;
+
+                if ((nextBlock is null) || (nextBlock.Id != targetOffset))
+                {
+                    nextBlock = BasicBlock.CreateUnsafe<T>();
+                    nextBlock.Id = targetOffset;
+                    nextBlock.InsertAfter(currentBlock);
+                }
+
+                if (controlFlow == ControlFlowKind.Cond_branch)
+                {
+                    currentBlock.AddChildBlock(nextBlock);
+                }
+            }
+            else if (controlFlow == ControlFlowKind.Cond_branch)
+            {
+                // We have a conditional branch, which means we can
+                // fallthrough into the next block, but we don't have
+                // any more instructions to decode.
+                ThrowForInvalidBranchTarget(targetOffset);
+            }
+        }
+
+        static bool TryGetNextBlock(int targetOffset, BasicBlock<T> currentBlock, [NotNullWhen(true)] out BasicBlock<T>? nextBlock)
+        {
+            var candidateBlock = currentBlock.NextBlock;
+            var foundBlock = false;
+
+            if ((candidateBlock is not null) && (candidateBlock.Id == targetOffset))
+            {
+                nextBlock = candidateBlock;
+                foundBlock = true;
+            }
+            else
+            {
+                nextBlock = null;
+            }
+
+            return foundBlock;
+        }
+
+        static void ProcessBranchTarget(int targetOffset, BasicBlock<T> currentBlock)
+        {
+            var candidateBlock = currentBlock;
+
+            if (currentBlock.Id < targetOffset)
+            {
+                // We are branching forward, so search forward for the target block and create it
+                // if it doesn't exist. We shouldn't have any forward blocks that have statements
+                // in them at this point since we won't have decoded that IL yet.
+
+                BasicBlock<T> previousCandidateBlock;
+
+                do
+                {
+                    previousCandidateBlock = candidateBlock;
+                    candidateBlock = candidateBlock.NextBlock;
+                }
+                while ((candidateBlock is not null) && (candidateBlock.Id < targetOffset));
+
+                if ((candidateBlock is null) || (candidateBlock.Id > targetOffset))
+                {
+                    candidateBlock = BasicBlock.CreateUnsafe<T>();
+                    candidateBlock.Id = targetOffset;
+                    candidateBlock.InsertAfter(previousCandidateBlock);
+                }
+            }
+            else if (currentBlock.Id > targetOffset)
+            {
+                // We are branching backward, so search backwards for the target block and split it
+                // if necessary. We will have already decoded the IL for all these blocks, so they
+                // should all be well-formed. However, we may have an invalid target and the statement
+                // won't be locatable, so we need to throw in that case.
+
+                do
+                {
+                    candidateBlock = candidateBlock.PreviousBlock;
+                }
+                while ((candidateBlock is not null) && (candidateBlock.Id > targetOffset));
+
+                Debug.Assert(candidateBlock is not null);
+
+                if (candidateBlock.Id != targetOffset)
+                {
+                    Debug.Assert(candidateBlock.Id < targetOffset);
+
+                    var candidateStatement = candidateBlock.FirstStatement;
+                    Statement<T> previousCandidateStatement;
+
+                    do
+                    {
+                        previousCandidateStatement = candidateStatement;
+                        candidateStatement = candidateStatement.NextStatement;
+                    }
+                    while ((candidateStatement is not null) && (candidateStatement.Id < targetOffset));
+
+                    if ((candidateStatement is not null) && (candidateStatement.Id == targetOffset))
+                    {
+                        var targetBlock = BasicBlock.CreateUnsafe<T>();
+                        targetBlock.Id = targetOffset;
+                        targetBlock.InsertAfter(candidateBlock);
+
+                        previousCandidateStatement.NextStatement = null;
+                        targetBlock.FirstStatement = candidateStatement;
+                        candidateStatement.PreviousStatement = null;
+                    }
+                    else
+                    {
+                        ThrowForInvalidBranchTarget(targetOffset);
+                    }
+                }
+            }
+
+            currentBlock.AddChildBlock(candidateBlock);
+        }
     }
-
-    public void Freeze()
-    {
-        _isReadOnly = true;
-    }
-
-    public bool IsReachable(BasicBlock block) => FirstBlock.CanReach(block);
-
-    public void TraverseBreadthFirst(Action<BasicBlock> action) => FirstBlock.TraverseBreadthFirst(action);
-
-    public IEnumerable<T> TraverseBreadthFirst<T>(Func<BasicBlock, T> func) => FirstBlock.TraverseBreadthFirst(func);
-
-    public void TraverseDepthFirst(Action<BasicBlock> action) => FirstBlock.TraverseDepthFirst(action);
-
-    public IEnumerable<T> TraverseDepthFirst<T>(Func<BasicBlock, T> func) => FirstBlock.TraverseDepthFirst(func);
 }

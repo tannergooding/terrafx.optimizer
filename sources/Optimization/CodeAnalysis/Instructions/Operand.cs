@@ -3,7 +3,7 @@
 using System;
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
+// using System.Globalization;
 using System.Reflection.Metadata;
 using System.Text;
 using static TerraFX.Optimization.Utilities.ExceptionUtilities;
@@ -114,9 +114,14 @@ public struct Operand : IEquatable<Operand>
                 }
 
                 case OperandKind.InlineBrTarget:
+                {
+                    argumentOutOfRange = value?.GetType() != typeof(int);
+                    break;
+                }
+
                 case OperandKind.ShortInlineBrTarget:
                 {
-                    argumentOutOfRange = value?.GetType() != typeof(Instruction);
+                    argumentOutOfRange = value?.GetType() != typeof(sbyte);
                     break;
                 }
 
@@ -220,7 +225,7 @@ public struct Operand : IEquatable<Operand>
 
                 case OperandKind.InlineSwitch:
                 {
-                    argumentOutOfRange = value?.GetType() != typeof(ImmutableArray<Instruction>);
+                    argumentOutOfRange = value?.GetType() != typeof(int[]);
                     break;
                 }
 
@@ -367,26 +372,26 @@ public struct Operand : IEquatable<Operand>
 
         var builder = new StringBuilder();
 
-        if (value is Instruction targetInstruction)
-        {
-            _ = AppendOffset(builder, targetInstruction);
-        }
-        else if (value is ImmutableArray<Instruction> targetInstructions)
-        {
-            _ = builder.Append('(');
-            var lastIndex = targetInstructions.Length - 1;
-
-            for (var i = 0; i < lastIndex; i++)
-            {
-                _ = AppendOffset(builder, targetInstructions[i]);
-                _ = builder.Append(',');
-                _ = builder.Append(' ');
-            }
-
-            _ = AppendOffset(builder, targetInstructions[lastIndex]);
-            _ = builder.Append(')');
-        }
-        else if (value is FieldDefinitionInfo fieldDefinitionInfo)
+        // if (value is Instruction targetInstruction)
+        // {
+        //     // _ = AppendOffset(builder, targetInstruction);
+        // }
+        // else if (value is ImmutableArray<Instruction> targetInstructions)
+        // {
+        //     // _ = builder.Append('(');
+        //     // var lastIndex = targetInstructions.Length - 1;
+        //     // 
+        //     // for (var i = 0; i < lastIndex; i++)
+        //     // {
+        //     //     _ = AppendOffset(builder, targetInstructions[i]);
+        //     //     _ = builder.Append(',');
+        //     //     _ = builder.Append(' ');
+        //     // }
+        //     // 
+        //     // _ = AppendOffset(builder, targetInstructions[lastIndex]);
+        //     // _ = builder.Append(')');
+        // }
+        if (value is FieldDefinitionInfo fieldDefinitionInfo)
         {
             _ = builder.Append(fieldDefinitionInfo);
         }
@@ -454,12 +459,5 @@ public struct Operand : IEquatable<Operand>
         }
 
         return builder.ToString();
-
-        static StringBuilder AppendOffset(StringBuilder builder, Instruction instruction)
-        {
-            _ = builder.Append("IL_");
-            var offset = instruction.Offset;
-            return builder.Append(offset.ToString("X4", CultureInfo.InvariantCulture));
-        }
     }
 }

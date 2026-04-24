@@ -11,6 +11,27 @@ namespace TerraFX.Optimization.Utilities;
 internal static partial class ExceptionUtilities
 {
     [DoesNotReturn]
+    public static void ThrowForInvalidBranchTarget(int targetOffset)
+    {
+        var message = string.Format(CultureInfo.InvariantCulture, Resources.InvalidBranchTarget, targetOffset);
+        ThrowInvalidOperationException(message);
+    }
+
+    [DoesNotReturn]
+    public static void ThrowForInvalidInsertAfter(IFormattable insertee, IFormattable target)
+    {
+        var message = string.Format(CultureInfo.InvariantCulture, Resources.InvalidInsertAfter, insertee, target);
+        ThrowInvalidOperationException(message);
+    }
+
+    [DoesNotReturn]
+    public static void ThrowForInvalidInsertBefore(IFormattable insertee, IFormattable target)
+    {
+        var message = string.Format(CultureInfo.InvariantCulture, Resources.InvalidInsertBefore, insertee, target);
+        ThrowInvalidOperationException(message);
+    }
+
+    [DoesNotReturn]
     public static void ThrowForInvalidKind<TEnum>(TEnum value, [CallerArgumentExpression(nameof(value))] string valueExpression = "")
         where TEnum : struct, Enum
     {

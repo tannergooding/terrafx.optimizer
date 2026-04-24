@@ -117,6 +117,15 @@
   <resheader name="writer">
     <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
   </resheader>
+  <data name="InvalidBranchTarget" xml:space="preserve">
+    <value>'{0}' is not a valid branch target</value>
+  </data>
+  <data name="InvalidInsertAfter" xml:space="preserve">
+    <value>'{0}' cannot be inserted after '{1}' as it would lose track of the previous or next node.</value>
+  </data>
+  <data name="InvalidInsertBefore" xml:space="preserve">
+    <value>'{0}' cannot be inserted before '{1}' as it would lose track of the previous or next node.</value>
+  </data>
   <data name="InvalidKindMessage" xml:space="preserve">
     <value>The kind for '{0}' is unsupported</value>
   </data>
